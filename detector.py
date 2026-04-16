@@ -7,12 +7,12 @@ import subprocess
 from collections import defaultdict
 
 LOG_FILE = "/var/log/auth.log"
-STATE_FILE = "/var/log/bf_defender_state.json"
-ALERT_LOG = "/var/log/bf_defender_alerts.log"
+STATE_FILE = "/var/log/defender_state.json"
+ALERT_LOG = "/var/log/defender_alerts.log"
 
-TIME_WINDOW = 60
-BLOCK_THRESHOLD = 6
-ALERT_THRESHOLD = 3
+TIME_WINDOW = 120
+BLOCK_THRESHOLD = 12
+ALERT_THRESHOLD = 6
 
 failed_attempts = defaultdict(list)
 blocked_ips = set()
@@ -107,7 +107,7 @@ def follow_log() -> None:
 
 def main() -> None:
     load_state()
-    log_alert("bf_defender started")
+    log_alert("defender started")
     follow_log()
 
 if __name__ == "__main__":
