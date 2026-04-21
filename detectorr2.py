@@ -28,6 +28,9 @@ TIME_WINDOW = 120       # seconds to look back for attempts
 BLOCK_THRESHOLD = 12    # attempts before blocking
 ALERT_THRESHOLD = 3     # attempts before alerting
 
+total_attempts = 0      # counter
+unique_ips = set()      # unique ips used
+
 # Progressive ban settings
 BASE_BLOCK_DURATION = 300   # 5 minutes initial ban
 MAX_BLOCK_DURATION = 3600   # max 1 hour ban
@@ -189,8 +192,13 @@ def risk_level(count):
 
 # Process a failed login attempt
 def process_failure(ip):
+    global total_attempts
+
     now = time.time()
     failed_attempts[ip].append(now)
+
+    total_attempts += 1
+    unique_ips.add(ip)
 
     # Keep only attempts within TIME_WINDOW
     failed_attempts[ip] = [
@@ -209,7 +217,37 @@ def process_failure(ip):
     if level == "HIGH":
         block_ip(ip)
 
+# Displays stats
+def print_stats():
+    print(
+        f"[STATS] Attempts: {total_attempts} | "
+        f"Unique IPs: {len(unique_ips)} | "
+        f"Active Blocks: {len(blocked_ips)}"
+    )
 
+def follow_log_file(log_file):
+    log_alert(f"monitoring log file: {log_file}")
+
+    last_stats_time = time.time()
+
+    with open(log_file, "r") as f:
+        f.seek(0, os.SEEK_END)
+
+        while True:
+            cleanup_blocked_ips()
+
+            # Print stats every 5 seconds
+            if time.time() - last_stats_time >= 5:
+                print_stats()
+                last_stats_time = time.time()
+
+            line = f.readline()
+            if not line:
+                time.sleep(0.5)
+                continue
+
+            parse_line(line)
+            
 # Parse log line for failures
 def parse_line(line):
     match = FAILED_RE.search(line) or INVALID_RE.search(line)
@@ -246,8 +284,15 @@ def follow_journal():
         text=True
     )
 
+    last_stats_time = time.time()
+
     for line in proc.stdout:
         cleanup_blocked_ips()
+
+        if time.time() - last_stats_time >= 5:
+            print_stats()
+            last_stats_time = time.time()
+
         parse_line(line)
 
 
