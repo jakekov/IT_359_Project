@@ -37,7 +37,7 @@ MAX_BLOCK_DURATION = 3600   # max 1 hour ban
 
 
 # Whitelist (never block these IPs)
-WHITELIST = {"127.0.0.1"}  # add your attacker/test IP here
+WHITELIST = {""}  # add your attacker/test IP here
 
 
 # Data structures
@@ -215,9 +215,9 @@ def process_failure(ip):
 
     # Block on high risk
     if level == "HIGH":
-    # Only block if not already blocked
-    if ip not in blocked_ips:
-        block_ip(ip)
+        # Only block if not already blocked
+        if ip not in blocked_ips:
+            block_ip(ip)
 
 
 # Displays stats
@@ -247,7 +247,7 @@ def follow_log_file(log_file):
                 parse_line(line)
 
             # Always runs (even if no logs)
-            if time.time() - last_stats_time >= 5:
+            if time.time() - last_stats_time >= 10:
                 print_stats()
                 last_stats_time = time.time()
             
