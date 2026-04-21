@@ -32,7 +32,7 @@ total_attempts = 0      # counter
 unique_ips = set()      # unique ips used
 
 # Progressive ban settings
-BASE_BLOCK_DURATION = 300   # 5 minutes initial ban
+BASE_BLOCK_DURATION = 30   # 5 minutes initial ban
 MAX_BLOCK_DURATION = 3600   # max 1 hour ban
 
 
@@ -247,7 +247,7 @@ def follow_log_file(log_file):
                 parse_line(line)
 
             # Always runs (even if no logs)
-            if time.time() - last_stats_time >= 10:
+            if time.time() - last_stats_time >= 15:
                 print_stats()
                 last_stats_time = time.time()
             
