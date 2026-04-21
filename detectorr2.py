@@ -120,7 +120,7 @@ def block_ip(ip):
     if ip in blocked_ips:
         offenses = blocked_ips[ip]["offenses"] + 1
     else:
-        offenses = 1
+        offenses = 0
 
     # Progressive ban duration (doubles each time)
     duration = min(BASE_BLOCK_DURATION * (2 ** (offenses - 1)), MAX_BLOCK_DURATION)
