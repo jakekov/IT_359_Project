@@ -16,8 +16,8 @@ POSSIBLE_LOG_FILES = [
 STATE_FILE = "/var/log/defender_state.json"
 ALERT_LOG = "/var/log/defender_alerts.log"
 
-TIME_WINDOW = 150
-BLOCK_THRESHOLD = 15
+TIME_WINDOW = 120
+BLOCK_THRESHOLD = 12
 ALERT_THRESHOLD = 3
 
 failed_attempts = defaultdict(list)
