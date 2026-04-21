@@ -215,7 +215,10 @@ def process_failure(ip):
 
     # Block on high risk
     if level == "HIGH":
+    # Only block if not already blocked
+    if ip not in blocked_ips:
         block_ip(ip)
+
 
 # Displays stats
 def print_stats():
