@@ -236,17 +236,17 @@ def follow_log_file(log_file):
         while True:
             cleanup_blocked_ips()
 
-            # Print stats every 5 seconds
+            line = f.readline()
+
+            if not line:
+                time.sleep(0.5)
+            else:
+                parse_line(line)
+
+            # Always runs (even if no logs)
             if time.time() - last_stats_time >= 5:
                 print_stats()
                 last_stats_time = time.time()
-
-            line = f.readline()
-            if not line:
-                time.sleep(0.5)
-                continue
-
-            parse_line(line)
             
 # Parse log line for failures
 def parse_line(line):
@@ -254,24 +254,6 @@ def parse_line(line):
     if match:
         ip = match.group(1)
         process_failure(ip)
-
-
-# Follow log file (like tail -f)
-def follow_log_file(log_file):
-    log_alert(f"monitoring log file: {log_file}")
-
-    with open(log_file, "r") as f:
-        f.seek(0, os.SEEK_END)
-
-        while True:
-            cleanup_blocked_ips()  # check for expired bans
-
-            line = f.readline()
-            if not line:
-                time.sleep(0.5)
-                continue
-
-            parse_line(line)
 
 
 # Follow systemd journal
