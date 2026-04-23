@@ -1,61 +1,104 @@
 #!/usr/bin/env python3
-import os
-import re
-import time
-import json
-import subprocess
-import sys
-from collections import defaultdict
 
+# Imports
+import os                # File/path operations
+import re                # Regex for parsing logs
+import time              # Time tracking for rate limiting + bans
+import json              # Save/load state to file
+import subprocess        # Run iptables + journalctl
+import sys               # Exit handling
+from collections import defaultdict  # Track attempts per IP easily
+
+
+# Log File Locations (varies by Linux distro)
 POSSIBLE_LOG_FILES = [
-    "/var/log/auth.log",   # Debian/Ubuntu/Kali sometimes
+    "/var/log/auth.log",   # Debian/Ubuntu/Kali
     "/var/log/secure",     # RHEL/CentOS
-    "/var/log/syslog",     # fallback, may contain ssh auth messages
+    "/var/log/syslog",     # fallback
 ]
 
-STATE_FILE = "/var/log/defender_state.json"
-ALERT_LOG = "/var/log/defender_alerts.log"
 
-TIME_WINDOW = 120
-BLOCK_THRESHOLD = 12
-ALERT_THRESHOLD = 3
+# Files for persistence + logging
+STATE_FILE = "/var/log/defender_state.json"   # Stores blocked IPs
+ALERT_LOG = "/var/log/defender_alerts.log"    # Stores alerts/events
 
+
+# Detection thresholds
+TIME_WINDOW = 120       # seconds to look back for attempts
+BLOCK_THRESHOLD = 12    # attempts before blocking
+ALERT_THRESHOLD = 3     # attempts before alerting
+
+total_attempts = 0      # counter
+unique_ips = set()      # unique ips used
+
+# Progressive ban settings
+BASE_BLOCK_DURATION = 30   # 5 minutes initial ban
+MAX_BLOCK_DURATION = 3600   # max 1 hour ban
+
+
+# Whitelist (never block these IPs)
+WHITELIST = {""}  # add your attacker/test IP here
+
+
+# Data structures
+
+# Tracks failed login timestamps per IP
 failed_attempts = defaultdict(list)
-blocked_ips = set()
+
+# Tracks blocked IPs with metadata:
+# {
+#   "ip": {
+#       "blocked_at": timestamp,
+#       "duration": seconds,
+#       "offenses": int
+#   }
+# }
+blocked_ips = {}
+
+# Prevents duplicate alert spam
 last_alert_count = {}
 
+
+# Regex patterns for failed SSH logins
 FAILED_RE = re.compile(r"Failed password for .* from (\d+\.\d+\.\d+\.\d+)")
 INVALID_RE = re.compile(r"Invalid user .* from (\d+\.\d+\.\d+\.\d+)")
 
-def find_log_file() -> str | None:
+
+# Find available log file
+def find_log_file():
     for path in POSSIBLE_LOG_FILES:
         if os.path.exists(path):
             return path
     return None
 
-def log_alert(message: str) -> None:
+
+# Log alerts to file + console
+def log_alert(message: str):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {message}"
     print(line)
     with open(ALERT_LOG, "a") as f:
         f.write(line + "\n")
 
-def save_state() -> None:
-    state = {"blocked_ips": list(blocked_ips)}
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
 
-def load_state() -> None:
+# Save blocked IP state (persistence)
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(blocked_ips, f)
+
+
+# Load blocked IP state
+def load_state():
     global blocked_ips
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
-                state = json.load(f)
-                blocked_ips = set(state.get("blocked_ips", []))
+                blocked_ips = json.load(f)
         except Exception:
-            blocked_ips = set()
+            blocked_ips = {}
 
-def iptables_rule_exists(ip: str) -> bool:
+# Check if firewall rule already exists
+def iptables_rule_exists(ip):
     result = subprocess.run(
         ["iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
         stdout=subprocess.DEVNULL,
@@ -63,82 +106,186 @@ def iptables_rule_exists(ip: str) -> bool:
     )
     return result.returncode == 0
 
-def block_ip(ip: str) -> None:
-    if ip in blocked_ips or iptables_rule_exists(ip):
-        blocked_ips.add(ip)
+
+# Block IP using iptables
+def block_ip(ip):
+    # Skip trusted IPs
+    if ip in WHITELIST:
+        log_alert(f"SKIPPED whitelist IP {ip}")
         return
 
+    now = time.time()
+
+    # Determine offense count
+    if ip in blocked_ips:
+        offenses = blocked_ips[ip]["offenses"] + 1
+    else:
+        offenses = 1
+
+    # Progressive ban duration (doubles each time)
+    duration = min(BASE_BLOCK_DURATION * (2 ** (offenses - 1)), MAX_BLOCK_DURATION)
+
+    # Add firewall rule if not already present
+    if not iptables_rule_exists(ip):
+        result = subprocess.run(
+            ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            log_alert(f"ERROR blocking {ip}: {result.stderr.strip()}")
+            return
+
+    # Store block info
+    blocked_ips[ip] = {
+        "blocked_at": now,
+        "duration": duration,
+        "offenses": offenses
+    }
+
+    save_state()
+    log_alert(f"BLOCKED {ip} for {duration}s (offense #{offenses})")
+
+
+# Unblock IP (remove firewall rule)
+def unblock_ip(ip):
     result = subprocess.run(
-        ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
+        ["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"],
         capture_output=True,
         text=True
     )
 
     if result.returncode == 0:
-        blocked_ips.add(ip)
-        save_state()
-        log_alert(f"BLOCKED {ip} after repeated failed logins")
+        log_alert(f"UNBLOCKED {ip}")
     else:
-        log_alert(f"ERROR blocking {ip}: {result.stderr.strip()}")
+        log_alert(f"ERROR unblocking {ip}: {result.stderr.strip()}")
 
-def risk_level(count: int) -> str:
+
+# Cleanup expired bans (AUTO-UNBLOCK)
+def cleanup_blocked_ips():
+    now = time.time()
+    to_remove = []
+
+    for ip, data in blocked_ips.items():
+        # Check if ban expired
+        if now - data["blocked_at"] >= data["duration"]:
+            unblock_ip(ip)
+            to_remove.append(ip)
+
+    # Remove from memory
+    for ip in to_remove:
+        del blocked_ips[ip]
+
+    if to_remove:
+        save_state()
+
+
+# Determine risk level
+def risk_level(count):
     if count >= BLOCK_THRESHOLD:
         return "HIGH"
     if count >= ALERT_THRESHOLD:
         return "MEDIUM"
     return "LOW"
 
-def process_failure(ip: str) -> None:
+
+# Process a failed login attempt
+def process_failure(ip):
+    global total_attempts
+
     now = time.time()
     failed_attempts[ip].append(now)
 
-    failed_attempts[ip] = [t for t in failed_attempts[ip] if now - t <= TIME_WINDOW]
+    total_attempts += 1
+    unique_ips.add(ip)
+
+    # Keep only attempts within TIME_WINDOW
+    failed_attempts[ip] = [
+        t for t in failed_attempts[ip] if now - t <= TIME_WINDOW
+    ]
+
     count = len(failed_attempts[ip])
     level = risk_level(count)
 
+    # Alert on medium risk
     if level == "MEDIUM" and last_alert_count.get(ip) != count:
         log_alert(f"ALERT {ip} has {count} failed logins in {TIME_WINDOW}s")
         last_alert_count[ip] = count
 
+    # Block on high risk
     if level == "HIGH":
-        block_ip(ip)
+        # Only block if not already blocked
+        if ip not in blocked_ips:
+            block_ip(ip)
 
-def parse_line(line: str) -> None:
+
+# Displays stats
+def print_stats():
+    print(
+        f"[STATS] Attempts: {total_attempts} | "
+        f"Unique IPs: {len(unique_ips)} | "
+        f"Active Blocks: {len(blocked_ips)}"
+    )
+
+def follow_log_file(log_file):
+    log_alert(f"monitoring log file: {log_file}")
+
+    last_stats_time = time.time()
+
+    with open(log_file, "r") as f:
+        f.seek(0, os.SEEK_END)
+
+        while True:
+            cleanup_blocked_ips()
+
+            line = f.readline()
+
+            if not line:
+                time.sleep(0.5)
+            else:
+                parse_line(line)
+
+            # Always runs (even if no logs)
+            if time.time() - last_stats_time >= 15:
+                print_stats()
+                last_stats_time = time.time()
+            
+# Parse log line for failures
+def parse_line(line):
     match = FAILED_RE.search(line) or INVALID_RE.search(line)
     if match:
         ip = match.group(1)
         process_failure(ip)
 
-def follow_log_file(log_file: str) -> None:
-    log_alert(f"monitoring log file: {log_file}")
-    with open(log_file, "r") as f:
-        f.seek(0, os.SEEK_END)
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.5)
-                continue
-            parse_line(line)
 
-def follow_journal() -> None:
-    log_alert("monitoring systemd journal for ssh/auth messages")
+# Follow systemd journal
+def follow_journal():
+    log_alert("monitoring systemd journal")
+
     proc = subprocess.Popen(
         ["journalctl", "-f", "-n", "0"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         text=True
     )
 
-    if proc.stdout is None:
-        log_alert("ERROR: could not read journalctl output")
-        sys.exit(1)
+    last_stats_time = time.time()
 
     for line in proc.stdout:
+        cleanup_blocked_ips()
+
+        if time.time() - last_stats_time >= 5:
+            print_stats()
+            last_stats_time = time.time()
+
         parse_line(line)
 
-def main() -> None:
+
+# Main entry point
+def main():
+    # Must run as root (iptables + logs)
     if os.geteuid() != 0:
-        print("This script must be run as root. Use: sudo python3 detector.py")
+        print("Run as root: sudo python3 detector.py")
         sys.exit(1)
 
     load_state()
@@ -150,5 +297,6 @@ def main() -> None:
     else:
         follow_journal()
 
+# Start script
 if __name__ == "__main__":
     main()
